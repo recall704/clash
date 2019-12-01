@@ -28,6 +28,7 @@ const (
 // DNSServer is DNS Server listening on tun devcice
 type DNSServer struct {
 	*dns.Server
+	resolver *dns.Resolver
 
 	stack         *stack.Stack
 	tcpListener   net.Listener
@@ -171,6 +172,7 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, ip net.IP, port int
 
 	server := &DNSServer{
 		Server:        serverIn,
+		resolver:      resolver,
 		stack:         s,
 		tcpListener:   tcpListener,
 		udpEndpoint:   endpoint,
@@ -209,21 +211,35 @@ func (s *DNSServer) Stop() {
 func (t *tunAdapter) DNSListen() string {
 	if t.dnsserver != nil {
 		id := t.dnsserver.udpEndpointID
-		fmt.Println(id)
 		return fmt.Sprintf("%s:%d", id.LocalAddress.String(), id.LocalPort)
 	}
 	return ""
 }
 
 // Stop stop the DNS Server on tun
-func (t *tunAdapter) CreateDNSServer(resolver *dns.Resolver, addr string) error {
-	if resolver == nil {
-		return fmt.Errorf("Failed to create DNS server on tun: resolver not provided")
+func (t *tunAdapter) ReCreateDNSServer(resolver *dns.Resolver, addr string) error {
+	if addr == "" && t.dnsserver == nil {
+		return nil
 	}
+
+	if addr == t.DNSListen() && t.dnsserver != nil && t.dnsserver.resolver == resolver {
+		return nil
+	}
+
+	if t.dnsserver != nil {
+		t.dnsserver.Stop()
+		t.dnsserver = nil
+		log.Debugln("Tun DNS server stoped")
+	}
+
 	var err error
 	_, port, err := net.SplitHostPort(addr)
 	if port == "0" || port == "" || err != nil {
 		return nil
+	}
+
+	if resolver == nil {
+		return fmt.Errorf("Failed to create DNS server on tun: resolver not provided")
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)

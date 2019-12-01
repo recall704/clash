@@ -7,6 +7,6 @@ type TunAdapter interface {
 	Close()
 	DeviceURL() string
 	// Create creates dns server on tun device
-	CreateDNSServer(resolver *dns.Resolver, addr string) error
+	ReCreateDNSServer(resolver *dns.Resolver, addr string) error
 	DNSListen() string
 }

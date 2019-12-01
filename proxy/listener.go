@@ -160,12 +160,12 @@ func ReCreateRedir(port int) error {
 }
 
 func ReCreateTun(conf config.Tun) error {
-
 	enable := conf.Enable
 	url := conf.DeviceURL
 	if tunAdapter != nil {
 		if enable && (url == "" || url == tunAdapter.DeviceURL()) {
-			return nil
+			// Though we don't need to recreate tun device, we should update tun DNSServer
+			return tunAdapter.ReCreateDNSServer(dns.DefaultResolver, conf.DNSListen)
 		}
 		tunAdapter.Close()
 		tunAdapter = nil
@@ -179,9 +179,9 @@ func ReCreateTun(conf config.Tun) error {
 		return err
 	}
 	if dns.DefaultResolver != nil {
-		err = tunAdapter.CreateDNSServer(dns.DefaultResolver, conf.DNSListen)
+		return tunAdapter.ReCreateDNSServer(dns.DefaultResolver, conf.DNSListen)
 	}
-	return err
+	return nil
 }
 
 // GetPorts return the ports of proxy servers
