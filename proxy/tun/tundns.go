@@ -24,6 +24,11 @@ const (
 	defaultTimeout = 5
 )
 
+var (
+	ipv4Zero = tcpip.Address(net.IPv4zero.To4())
+	ipv6Zero = tcpip.Address(net.IPv6zero.To16())
+)
+
 // DNSServer is DNS Server listening on tun devcice
 type DNSServer struct {
 	*dns.Server
@@ -133,6 +138,9 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, ip net.IP, port int
 		address.Addr = tcpip.Address(ip.To16())
 		v4 = false
 	}
+	if address.Addr == ipv4Zero || address.Addr == ipv6Zero {
+		address.Addr = ""
+	}
 
 	handler := dns.NewHandler(resolver)
 	serverIn := &dns.Server{}
@@ -168,6 +176,9 @@ func CreateDNSServer(s *stack.Stack, resolver *dns.Resolver, ip net.IP, port int
 	} else {
 		tcpListener, err = gonet.NewListener(s, address, ipv6.ProtocolNumber)
 	}
+	if err != nil {
+		return nil, fmt.Errorf("Can not listen on tun: %v", err)
+	}
 
 	server := &DNSServer{
 		Server:        serverIn,
@@ -193,7 +204,9 @@ func (s *DNSServer) Stop() {
 	// shutdown TCP DNS Server
 	s.Server.Shutdown()
 	// remove TCP endpoint from stack
-	s.Listener.Close()
+	if s.Listener != nil {
+		s.Listener.Close()
+	}
 	// remove udp endpoint from stack
 	s.stack.UnregisterTransportEndpoint(1,
 		[]tcpip.NetworkProtocolNumber{
