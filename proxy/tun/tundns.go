@@ -12,7 +12,6 @@ import (
 	"github.com/Dreamacro/clash/log"
 	"github.com/google/netstack/tcpip"
 	"github.com/google/netstack/tcpip/adapters/gonet"
-	"github.com/google/netstack/tcpip/buffer"
 	"github.com/google/netstack/tcpip/network/ipv4"
 	"github.com/google/netstack/tcpip/network/ipv6"
 	"github.com/google/netstack/tcpip/stack"
@@ -87,11 +86,11 @@ func (e *dnsEndpoint) UniqueID() uint64 {
 	return e.uniqueID
 }
 
-func (e *dnsEndpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, vv buffer.VectorisedView) {
-	e.udpForwarder.HandlePacket(r, id, nil, vv)
+func (e *dnsEndpoint) HandlePacket(r *stack.Route, id stack.TransportEndpointID, pkt tcpip.PacketBuffer) {
+	e.udpForwarder.HandlePacket(r, id, pkt)
 }
 
-func (e *dnsEndpoint) HandleControlPacket(id stack.TransportEndpointID, typ stack.ControlType, extra uint32, vv buffer.VectorisedView) {
+func (e *dnsEndpoint) HandleControlPacket(id stack.TransportEndpointID, typ stack.ControlType, extra uint32, pkt tcpip.PacketBuffer) {
 }
 
 func (e *dnsEndpoint) Close() {
