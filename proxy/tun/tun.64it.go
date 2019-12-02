@@ -104,8 +104,7 @@ func NewTunProxy(deviceURL string) (TunAdapter, error) {
 
 		conn := gonet.NewConn(&wq, ep)
 		target := getAddr(ep.Info().(*stack.TransportEndpointInfo).ID)
-		tun.Add(adapters.NewSocket(target, conn, C.TUN, C.UDP))
-
+		tun.Add(adapters.NewTun(target, conn, C.TUN, C.UDP))
 	})
 	ipstack.SetTransportProtocolHandler(udp.ProtocolNumber, udpFwd.HandlePacket)
 

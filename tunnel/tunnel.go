@@ -94,8 +94,12 @@ func (t *Tunnel) process() {
 	go func() {
 		queue := t.udpQueue.Out()
 		for elm := range queue {
-			conn := elm.(C.ServerAdapter)
-			t.handleUDPConn(conn)
+			switch conn := elm.(type) {
+			case *InboundAdapter.TunAdapter:
+				go t.handleTunUDPConn(conn)
+			case *InboundAdapter.SocketAdapter:
+				t.handleUDPConn(conn)
+			}
 		}
 	}()
 
@@ -208,6 +212,34 @@ func (t *Tunnel) handleUDPConn(localConn C.ServerAdapter) {
 			t.handleUDPToRemote(localConn, pc, addr)
 		}
 	}()
+}
+
+func (t *Tunnel) handleTunUDPConn(localConn C.ServerAdapter) {
+	metadata := localConn.Metadata()
+	if !metadata.Valid() {
+		log.Warnln("[Metadata] not valid: %#v", metadata)
+		return
+	}
+
+	proxy, rule, err := t.resolveMetadata(metadata)
+	if err != nil {
+		log.Warnln("Parse metadata failed: %s", err.Error())
+		return
+	}
+
+	rawPc, nAddr, err := proxy.DialUDP(metadata)
+	if err != nil {
+		log.Warnln("dial %s error: %s", proxy.Name(), err.Error())
+		return
+	}
+	pc := newUDPTracker(rawPc, DefaultManager, metadata, rule)
+
+	if rule != nil {
+		log.Infoln("%s --> %v match %s using %s", metadata.SrcIP.String(), metadata.String(), rule.RuleType().String(), rawPc.Chains().String())
+	} else {
+		log.Infoln("%s --> %v doesn't match any rule using DIRECT", metadata.SrcIP.String(), metadata.String())
+	}
+	relayUDP(localConn, pc, nAddr, udpTimeout)
 }
 
 func (t *Tunnel) handleTCPConn(localConn C.ServerAdapter) {

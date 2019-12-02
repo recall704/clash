@@ -136,3 +136,43 @@ func relay(leftConn, rightConn net.Conn) {
 	rightConn.SetReadDeadline(time.Now())
 	<-ch
 }
+
+func relayUDP(conn net.Conn, pc net.PacketConn, addr net.Addr, timeout time.Duration) {
+	ch := make(chan error)
+
+	go func() {
+		buf := pool.BufPool.Get().([]byte)
+		var err error
+		for {
+			conn.SetReadDeadline(time.Now().Add(timeout))
+			n, err := conn.Read(buf)
+			if err != nil {
+				break
+			}
+			if _, err = pc.WriteTo(buf[:n], addr); err != nil {
+				break
+			}
+			DefaultManager.Upload() <- int64(n)
+		}
+		pool.BufPool.Put(buf[:cap(buf)])
+		ch <- err
+	}()
+
+	buf := pool.BufPool.Get().([]byte)
+	for {
+		pc.SetReadDeadline(time.Now().Add(timeout))
+		n, _, err := pc.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+		n, err = conn.Write(buf[:n])
+		if err != nil {
+			break
+		}
+		DefaultManager.Download() <- int64(n)
+	}
+	pool.BufPool.Put(buf[:cap(buf)])
+	<-ch
+	pc.Close()
+	conn.Close()
+}
