@@ -28,6 +28,7 @@ type General struct {
 	Port               int          `json:"port"`
 	SocksPort          int          `json:"socks-port"`
 	RedirPort          int          `json:"redir-port"`
+	Tun                Tun          `json:"tun"`
 	Authentication     []string     `json:"authentication"`
 	AllowLan           bool         `json:"allow-lan"`
 	BindAddress        string       `json:"bind-address"`
@@ -56,6 +57,13 @@ type FallbackFilter struct {
 	IPCIDR []*net.IPNet `yaml:"ipcidr"`
 }
 
+// Tun config
+type Tun struct {
+	Enable    bool   `yaml:"enable" json:"enable"`
+	DeviceURL string `yaml:"device-url" json:"device-url"`
+	DNSListen string `yaml:"dns-listen" json:"dns-listen"`
+}
+
 // Experimental config
 type Experimental struct {
 	IgnoreResolveFail bool `yaml:"ignore-resolve-fail"`
@@ -64,6 +72,7 @@ type Experimental struct {
 // Config is clash config manager
 type Config struct {
 	General      *General
+	Tun          *Tun
 	DNS          *DNS
 	Experimental *Experimental
 	Hosts        *trie.Trie
@@ -103,6 +112,7 @@ type rawConfig struct {
 
 	Hosts        map[string]string        `yaml:"hosts"`
 	DNS          rawDNS                   `yaml:"dns"`
+	Tun          Tun                      `yaml:"tun"`
 	Experimental Experimental             `yaml:"experimental"`
 	Proxy        []map[string]interface{} `yaml:"Proxy"`
 	ProxyGroup   []map[string]interface{} `yaml:"Proxy Group"`
@@ -121,11 +131,11 @@ func readRawConfig(path string) ([]byte, error) {
 	}
 
 	path = path[:len(path)-5] + ".yml"
-	if _, err = os.Stat(path); err == nil {
+	if _, fallbackErr := os.Stat(path); fallbackErr == nil {
 		return ioutil.ReadFile(path)
 	}
 
-	return data, nil
+	return data, err
 }
 
 func readConfig(path string) (*rawConfig, error) {
@@ -152,6 +162,11 @@ func readConfig(path string) (*rawConfig, error) {
 		Rule:           []string{},
 		Proxy:          []map[string]interface{}{},
 		ProxyGroup:     []map[string]interface{}{},
+		Tun: Tun{
+			Enable:    false,
+			DeviceURL: "dev://clash0",
+			DNSListen: "",
+		},
 		Experimental: Experimental{
 			IgnoreResolveFail: true,
 		},
@@ -217,6 +232,7 @@ func parseGeneral(cfg *rawConfig) (*General, error) {
 	port := cfg.Port
 	socksPort := cfg.SocksPort
 	redirPort := cfg.RedirPort
+	tun := cfg.Tun
 	allowLan := cfg.AllowLan
 	bindAddress := cfg.BindAddress
 	externalController := cfg.ExternalController
@@ -239,6 +255,7 @@ func parseGeneral(cfg *rawConfig) (*General, error) {
 		Port:               port,
 		SocksPort:          socksPort,
 		RedirPort:          redirPort,
+		Tun:                tun,
 		AllowLan:           allowLan,
 		BindAddress:        bindAddress,
 		Mode:               mode,
@@ -427,14 +444,19 @@ func parseRules(cfg *rawConfig, proxies map[string]C.Proxy) ([]C.Rule, error) {
 		var (
 			payload string
 			target  string
+			params  = []string{}
 		)
 
-		switch len(rule) {
-		case 2:
+		switch l := len(rule); {
+		case l == 2:
 			target = rule[1]
-		case 3:
+		case l == 3:
 			payload = rule[1]
 			target = rule[2]
+		case l >= 4:
+			payload = rule[1]
+			target = rule[2]
+			params = rule[3:]
 		default:
 			return nil, fmt.Errorf("Rules[%d] [%s] error: format invalid", idx, line)
 		}
@@ -444,7 +466,12 @@ func parseRules(cfg *rawConfig, proxies map[string]C.Proxy) ([]C.Rule, error) {
 		}
 
 		rule = trimArr(rule)
-		var parsed C.Rule
+		params = trimArr(params)
+		var (
+			parseErr error
+			parsed   C.Rule
+		)
+
 		switch rule[0] {
 		case "DOMAIN":
 			parsed = R.NewDomain(payload, target)
@@ -453,35 +480,31 @@ func parseRules(cfg *rawConfig, proxies map[string]C.Proxy) ([]C.Rule, error) {
 		case "DOMAIN-KEYWORD":
 			parsed = R.NewDomainKeyword(payload, target)
 		case "GEOIP":
-			parsed = R.NewGEOIP(payload, target)
+			noResolve := R.HasNoResolve(params)
+			parsed = R.NewGEOIP(payload, target, noResolve)
 		case "IP-CIDR", "IP-CIDR6":
-			if rule := R.NewIPCIDR(payload, target, false); rule != nil {
-				parsed = rule
-			}
+			noResolve := R.HasNoResolve(params)
+			parsed, parseErr = R.NewIPCIDR(payload, target, R.WithIPCIDRNoResolve(noResolve))
 		// deprecated when bump to 1.0
 		case "SOURCE-IP-CIDR":
 			fallthrough
 		case "SRC-IP-CIDR":
-			if rule := R.NewIPCIDR(payload, target, true); rule != nil {
-				parsed = rule
-			}
+			parsed, parseErr = R.NewIPCIDR(payload, target, R.WithIPCIDRSourceIP(true), R.WithIPCIDRNoResolve(true))
 		case "SRC-PORT":
-			if rule := R.NewPort(payload, target, true); rule != nil {
-				parsed = rule
-			}
+			parsed, parseErr = R.NewPort(payload, target, true)
 		case "DST-PORT":
-			if rule := R.NewPort(payload, target, false); rule != nil {
-				parsed = rule
-			}
+			parsed, parseErr = R.NewPort(payload, target, false)
 		case "MATCH":
 			fallthrough
 		// deprecated when bump to 1.0
 		case "FINAL":
 			parsed = R.NewMatch(target)
+		default:
+			parseErr = fmt.Errorf("unsupported rule type %s", rule[0])
 		}
 
-		if parsed == nil {
-			return nil, fmt.Errorf("Rules[%d] [%s] error: payload invalid", idx, line)
+		if parseErr != nil {
+			return nil, fmt.Errorf("Rules[%d] [%s] error: %s", idx, line, parseErr.Error())
 		}
 
 		rules = append(rules, parsed)
