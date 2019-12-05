@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/Dreamacro/clash/component/hijack"
 	C "github.com/Dreamacro/clash/constant"
 )
 
@@ -48,6 +49,15 @@ func (h *Http) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, e
 		return nil, fmt.Errorf("%s connect error", h.addr)
 	}
 	tcpKeepAlive(c)
+
+	var auth string
+	if h.user != "" && h.pass != "" {
+		auth = base64.StdEncoding.EncodeToString([]byte(h.user + ":" + h.pass))
+	}
+	if metadata.DstPort == "80" {
+		hc := hijack.NewHijack(c, metadata.String(), auth)
+		return newConn(hc, h), nil
+	}
 	if err := h.shakeHand(metadata, c); err != nil {
 		return nil, err
 	}
