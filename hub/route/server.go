@@ -36,7 +36,7 @@ type Traffic struct {
 }
 
 func SetUIPath(path string) {
-	uiPath = path
+	uiPath = C.Path.Resolve(path)
 }
 
 func Start(addr string, secret string) {
@@ -57,10 +57,10 @@ func Start(addr string, secret string) {
 	})
 
 	r.Use(cors.Handler)
-	r.Get("/", hello)
 	r.Group(func(r chi.Router) {
 		r.Use(authentication)
 
+		r.Get("/", hello)
 		r.Get("/logs", getLogs)
 		r.Get("/traffic", traffic)
 		r.Get("/version", version)
@@ -68,6 +68,7 @@ func Start(addr string, secret string) {
 		r.Mount("/proxies", proxyRouter())
 		r.Mount("/rules", ruleRouter())
 		r.Mount("/connections", connectionRouter())
+		r.Mount("/providers/proxies", proxyProviderRouter())
 	})
 
 	if uiPath != "" {
@@ -109,9 +110,9 @@ func authentication(next http.Handler) http.Handler {
 		header := r.Header.Get("Authorization")
 		text := strings.SplitN(header, " ", 2)
 
-		hasUnvalidHeader := text[0] != "Bearer"
-		hasUnvalidSecret := len(text) == 2 && text[1] != serverSecret
-		if hasUnvalidHeader || hasUnvalidSecret {
+		hasInvalidHeader := text[0] != "Bearer"
+		hasInvalidSecret := len(text) != 2 || text[1] != serverSecret
+		if hasInvalidHeader || hasInvalidSecret {
 			render.Status(r, http.StatusUnauthorized)
 			render.JSON(w, r, ErrUnauthorized)
 			return

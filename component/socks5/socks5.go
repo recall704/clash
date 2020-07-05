@@ -2,6 +2,7 @@ package socks5
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -19,6 +20,8 @@ func (err Error) Error() string {
 
 // Command is request commands as defined in RFC 1928 section 4.
 type Command = uint8
+
+const Version = 5
 
 // SOCKS request commands as defined in RFC 1928 section 4.
 const (
@@ -60,6 +63,25 @@ func (a Addr) String() string {
 	}
 
 	return net.JoinHostPort(host, port)
+}
+
+// UDPAddr converts a socks5.Addr to *net.UDPAddr
+func (a Addr) UDPAddr() *net.UDPAddr {
+	if len(a) == 0 {
+		return nil
+	}
+	switch a[0] {
+	case AtypIPv4:
+		var ip [net.IPv4len]byte
+		copy(ip[0:], a[1:1+net.IPv4len])
+		return &net.UDPAddr{IP: net.IP(ip[:]), Port: int(binary.BigEndian.Uint16(a[1+net.IPv4len : 1+net.IPv4len+2]))}
+	case AtypIPv6:
+		var ip [net.IPv6len]byte
+		copy(ip[0:], a[1:1+net.IPv6len])
+		return &net.UDPAddr{IP: net.IP(ip[:]), Port: int(binary.BigEndian.Uint16(a[1+net.IPv6len : 1+net.IPv6len+2]))}
+	}
+	// Other Atyp
+	return nil
 }
 
 // SOCKS errors as defined in RFC 1928 section 6.
@@ -158,7 +180,7 @@ func ServerHandshake(rw net.Conn, authenticator auth.Authenticator) (addr Addr, 
 	}
 
 	command = buf[1]
-	addr, err = readAddr(rw, buf)
+	addr, err = ReadAddr(rw, buf)
 	if err != nil {
 		return
 	}
@@ -207,6 +229,10 @@ func ClientHandshake(rw io.ReadWriter, addr Addr, command Command, user *User) (
 	}
 
 	if buf[1] == 2 {
+		if user == nil {
+			return nil, ErrAuth
+		}
+
 		// password protocol version
 		authMsg := &bytes.Buffer{}
 		authMsg.WriteByte(1)
@@ -240,10 +266,10 @@ func ClientHandshake(rw io.ReadWriter, addr Addr, command Command, user *User) (
 		return nil, err
 	}
 
-	return readAddr(rw, buf)
+	return ReadAddr(rw, buf)
 }
 
-func readAddr(r io.Reader, b []byte) (Addr, error) {
+func ReadAddr(r io.Reader, b []byte) (Addr, error) {
 	if len(b) < MaxAddrLen {
 		return nil, io.ErrShortBuffer
 	}
@@ -336,6 +362,40 @@ func ParseAddr(s string) Addr {
 	addr[len(addr)-2], addr[len(addr)-1] = byte(portnum>>8), byte(portnum)
 
 	return addr
+}
+
+// ParseAddrToSocksAddr parse a socks addr from net.addr
+// This is a fast path of ParseAddr(addr.String())
+func ParseAddrToSocksAddr(addr net.Addr) Addr {
+	var hostip net.IP
+	var port int
+	if udpaddr, ok := addr.(*net.UDPAddr); ok {
+		hostip = udpaddr.IP
+		port = udpaddr.Port
+	} else if tcpaddr, ok := addr.(*net.TCPAddr); ok {
+		hostip = tcpaddr.IP
+		port = tcpaddr.Port
+	}
+
+	// fallback parse
+	if hostip == nil {
+		return ParseAddr(addr.String())
+	}
+
+	var parsed Addr
+	if ip4 := hostip.To4(); ip4.DefaultMask() != nil {
+		parsed = make([]byte, 1+net.IPv4len+2)
+		parsed[0] = AtypIPv4
+		copy(parsed[1:], ip4)
+		binary.BigEndian.PutUint16(parsed[1+net.IPv4len:], uint16(port))
+
+	} else {
+		parsed = make([]byte, 1+net.IPv6len+2)
+		parsed[0] = AtypIPv6
+		copy(parsed[1:], hostip)
+		binary.BigEndian.PutUint16(parsed[1+net.IPv6len:], uint16(port))
+	}
+	return parsed
 }
 
 // DecodeUDPPacket split `packet` to addr payload, and this function is mutable with `packet`

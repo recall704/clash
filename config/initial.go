@@ -1,53 +1,49 @@
 package config
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"strings"
 
+	"github.com/Dreamacro/clash/component/mmdb"
 	C "github.com/Dreamacro/clash/constant"
-
-	log "github.com/sirupsen/logrus"
+	"github.com/Dreamacro/clash/log"
 )
 
 func downloadMMDB(path string) (err error) {
-	resp, err := http.Get("http://geolite.maxmind.com/download/geoip/database/GeoLite2-Country.tar.gz")
+	resp, err := http.Get("https://github.com/Dreamacro/maxmind-geoip/releases/latest/download/Country.mmdb")
 	if err != nil {
 		return
 	}
 	defer resp.Body.Close()
 
-	gr, err := gzip.NewReader(resp.Body)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return
+		return err
 	}
-	defer gr.Close()
+	defer f.Close()
+	_, err = io.Copy(f, resp.Body)
 
-	tr := tar.NewReader(gr)
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			break
-		} else if err != nil {
-			return err
+	return err
+}
+
+func initMMDB() error {
+	if _, err := os.Stat(C.Path.MMDB()); os.IsNotExist(err) {
+		log.Infoln("Can't find MMDB, start download")
+		if err := downloadMMDB(C.Path.MMDB()); err != nil {
+			return fmt.Errorf("Can't download MMDB: %s", err.Error())
+		}
+	}
+
+	if !mmdb.Verify() {
+		log.Warnln("MMDB invalid, remove and download")
+		if err := os.Remove(C.Path.MMDB()); err != nil {
+			return fmt.Errorf("Can't remove invalid MMDB: %s", err.Error())
 		}
 
-		if !strings.HasSuffix(h.Name, "GeoLite2-Country.mmdb") {
-			continue
-		}
-
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = io.Copy(f, tr)
-		if err != nil {
-			return err
+		if err := downloadMMDB(C.Path.MMDB()); err != nil {
+			return fmt.Errorf("Can't download MMDB: %s", err.Error())
 		}
 	}
 
@@ -65,17 +61,18 @@ func Init(dir string) error {
 
 	// initial config.yaml
 	if _, err := os.Stat(C.Path.Config()); os.IsNotExist(err) {
-		log.Info("Can't find config, create an empty file")
-		os.OpenFile(C.Path.Config(), os.O_CREATE|os.O_WRONLY, 0644)
+		log.Infoln("Can't find config, create a initial config file")
+		f, err := os.OpenFile(C.Path.Config(), os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("Can't create file %s: %s", C.Path.Config(), err.Error())
+		}
+		f.Write([]byte(`port: 7890`))
+		f.Close()
 	}
 
 	// initial mmdb
-	if _, err := os.Stat(C.Path.MMDB()); os.IsNotExist(err) {
-		log.Info("Can't find MMDB, start download")
-		err := downloadMMDB(C.Path.MMDB())
-		if err != nil {
-			return fmt.Errorf("Can't download MMDB: %s", err.Error())
-		}
+	if err := initMMDB(); err != nil {
+		return fmt.Errorf("Can't initial MMDB: %w", err)
 	}
 	return nil
 }

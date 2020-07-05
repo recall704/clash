@@ -34,15 +34,15 @@ func (ho *HTTPObfs) Read(b []byte) (int, error) {
 	}
 
 	if ho.firstResponse {
-		buf := pool.BufPool.Get().([]byte)
+		buf := pool.Get(pool.RelayBufferSize)
 		n, err := ho.Conn.Read(buf)
 		if err != nil {
-			pool.BufPool.Put(buf[:cap(buf)])
+			pool.Put(buf)
 			return 0, err
 		}
 		idx := bytes.Index(buf[:n], []byte("\r\n\r\n"))
 		if idx == -1 {
-			pool.BufPool.Put(buf[:cap(buf)])
+			pool.Put(buf)
 			return 0, io.EOF
 		}
 		ho.firstResponse = false
@@ -52,7 +52,7 @@ func (ho *HTTPObfs) Read(b []byte) (int, error) {
 			ho.buf = buf[:idx+4+length]
 			ho.offset = idx + 4 + n
 		} else {
-			pool.BufPool.Put(buf[:cap(buf)])
+			pool.Put(buf)
 		}
 		return n, nil
 	}
@@ -67,7 +67,10 @@ func (ho *HTTPObfs) Write(b []byte) (int, error) {
 		req.Header.Set("User-Agent", fmt.Sprintf("curl/7.%d.%d", rand.Int()%54, rand.Int()%2))
 		req.Header.Set("Upgrade", "websocket")
 		req.Header.Set("Connection", "Upgrade")
-		req.Host = fmt.Sprintf("%s:%s", ho.host, ho.port)
+		req.Host = ho.host
+		if ho.port != "80" {
+			req.Host = fmt.Sprintf("%s:%s", ho.host, ho.port)
+		}
 		req.Header.Set("Sec-WebSocket-Key", base64.URLEncoding.EncodeToString(randBytes))
 		req.ContentLength = int64(len(b))
 		err := req.Write(ho.Conn)

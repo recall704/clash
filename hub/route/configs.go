@@ -8,7 +8,7 @@ import (
 	"github.com/Dreamacro/clash/hub/executor"
 	"github.com/Dreamacro/clash/log"
 	P "github.com/Dreamacro/clash/proxy"
-	T "github.com/Dreamacro/clash/tunnel"
+	"github.com/Dreamacro/clash/tunnel"
 
 	"github.com/go-chi/chi"
 	"github.com/go-chi/render"
@@ -23,13 +23,14 @@ func configRouter() http.Handler {
 }
 
 type configSchema struct {
-	Port        *int          `json:"port"`
-	SocksPort   *int          `json:"socks-port"`
-	RedirPort   *int          `json:"redir-port"`
-	AllowLan    *bool         `json:"allow-lan"`
-	BindAddress *string       `json:"bind-address"`
-	Mode        *T.Mode       `json:"mode"`
-	LogLevel    *log.LogLevel `json:"log-level"`
+	Port        *int               `json:"port"`
+	SocksPort   *int               `json:"socks-port"`
+	RedirPort   *int               `json:"redir-port"`
+	MixedPort   *int               `json:"mixed-port"`
+	AllowLan    *bool              `json:"allow-lan"`
+	BindAddress *string            `json:"bind-address"`
+	Mode        *tunnel.TunnelMode `json:"mode"`
+	LogLevel    *log.LogLevel      `json:"log-level"`
 }
 
 func getConfigs(w http.ResponseWriter, r *http.Request) {
@@ -65,9 +66,10 @@ func patchConfigs(w http.ResponseWriter, r *http.Request) {
 	P.ReCreateHTTP(pointerOrDefault(general.Port, ports.Port))
 	P.ReCreateSocks(pointerOrDefault(general.SocksPort, ports.SocksPort))
 	P.ReCreateRedir(pointerOrDefault(general.RedirPort, ports.RedirPort))
+	P.ReCreateMixed(pointerOrDefault(general.MixedPort, ports.MixedPort))
 
 	if general.Mode != nil {
-		T.Instance().SetMode(*general.Mode)
+		tunnel.SetMode(*general.Mode)
 	}
 
 	if general.LogLevel != nil {

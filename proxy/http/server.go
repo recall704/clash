@@ -16,10 +16,6 @@ import (
 	"github.com/Dreamacro/clash/tunnel"
 )
 
-var (
-	tun = tunnel.Instance()
-)
-
 type HttpListener struct {
 	net.Listener
 	address string
@@ -45,7 +41,7 @@ func NewHttpProxy(addr string) (*HttpListener, error) {
 				}
 				continue
 			}
-			go handleConn(c, hl.cache)
+			go HandleConn(c, hl.cache)
 		}
 	}()
 
@@ -73,7 +69,7 @@ func canActivate(loginStr string, authenticator auth.Authenticator, cache *cache
 	return
 }
 
-func handleConn(conn net.Conn, cache *cache.Cache) {
+func HandleConn(conn net.Conn, cache *cache.Cache) {
 	br := bufio.NewReader(conn)
 	request, err := http.ReadRequest(br)
 	if err != nil || request.URL.Host == "" {
@@ -100,9 +96,9 @@ func handleConn(conn net.Conn, cache *cache.Cache) {
 		if err != nil {
 			return
 		}
-		tun.Add(adapters.NewHTTPS(request, conn))
+		tunnel.Add(adapters.NewHTTPS(request, conn))
 		return
 	}
 
-	tun.Add(adapters.NewHTTP(request, conn))
+	tunnel.Add(adapters.NewHTTP(request, conn))
 }
