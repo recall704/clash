@@ -1,4 +1,4 @@
-package adapters
+package outbound
 
 import (
 	"context"
@@ -18,6 +18,7 @@ var (
 
 type Base struct {
 	name string
+	addr string
 	tp   C.AdapterType
 	udp  bool
 }
@@ -30,20 +31,34 @@ func (b *Base) Type() C.AdapterType {
 	return b.tp
 }
 
-func (b *Base) DialUDP(metadata *C.Metadata) (C.PacketConn, net.Addr, error) {
-	return nil, nil, errors.New("no support")
+func (b *Base) StreamConn(c net.Conn, metadata *C.Metadata) (net.Conn, error) {
+	return c, errors.New("no support")
+}
+
+func (b *Base) DialUDP(metadata *C.Metadata) (C.PacketConn, error) {
+	return nil, errors.New("no support")
 }
 
 func (b *Base) SupportUDP() bool {
 	return b.udp
 }
 
-func (b *Base) Destroy() {}
-
 func (b *Base) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{
 		"type": b.Type().String(),
 	})
+}
+
+func (b *Base) Addr() string {
+	return b.addr
+}
+
+func (b *Base) Unwrap(metadata *C.Metadata) C.Proxy {
+	return nil
+}
+
+func NewBase(name string, addr string, tp C.AdapterType, udp bool) *Base {
+	return &Base{name, addr, tp, udp}
 }
 
 type conn struct {
@@ -59,7 +74,7 @@ func (c *conn) AppendToChains(a C.ProxyAdapter) {
 	c.chain = append(c.chain, a.Name())
 }
 
-func newConn(c net.Conn, a C.ProxyAdapter) C.Conn {
+func NewConn(c net.Conn, a C.ProxyAdapter) C.Conn {
 	return &conn{c, []string{a.Name()}}
 }
 
@@ -76,8 +91,8 @@ func (c *packetConn) AppendToChains(a C.ProxyAdapter) {
 	c.chain = append(c.chain, a.Name())
 }
 
-func newPacketConn(c net.PacketConn, a C.ProxyAdapter) C.PacketConn {
-	return &packetConn{c, []string{a.Name()}}
+func newPacketConn(pc net.PacketConn, a C.ProxyAdapter) C.PacketConn {
+	return &packetConn{pc, []string{a.Name()}}
 }
 
 type Proxy struct {
@@ -140,6 +155,7 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 	mapping := map[string]interface{}{}
 	json.Unmarshal(inner, &mapping)
 	mapping["history"] = p.DelayHistory()
+	mapping["name"] = p.Name()
 	return json.Marshal(mapping)
 }
 
@@ -186,7 +202,12 @@ func (p *Proxy) URLTest(ctx context.Context, url string) (t uint16, err error) {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	client := http.Client{Transport: transport}
+	client := http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return
@@ -198,10 +219,4 @@ func (p *Proxy) URLTest(ctx context.Context, url string) (t uint16, err error) {
 
 func NewProxy(adapter C.ProxyAdapter) *Proxy {
 	return &Proxy{adapter, queue.New(10), true}
-}
-
-// ProxyGroupOption contain the common options for all kind of ProxyGroup
-type ProxyGroupOption struct {
-	Name    string   `proxy:"name"`
-	Proxies []string `proxy:"proxies"`
 }

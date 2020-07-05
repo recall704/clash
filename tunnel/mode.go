@@ -3,13 +3,14 @@ package tunnel
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
-type Mode int
+type TunnelMode int
 
 var (
 	// ModeMapping is a mapping for Mode enum
-	ModeMapping = map[string]Mode{
+	ModeMapping = map[string]TunnelMode{
 		Global.String(): Global,
 		Rule.String():   Rule,
 		Direct.String(): Direct,
@@ -17,16 +18,16 @@ var (
 )
 
 const (
-	Global Mode = iota
+	Global TunnelMode = iota
 	Rule
 	Direct
 )
 
 // UnmarshalJSON unserialize Mode
-func (m *Mode) UnmarshalJSON(data []byte) error {
+func (m *TunnelMode) UnmarshalJSON(data []byte) error {
 	var tp string
 	json.Unmarshal(data, &tp)
-	mode, exist := ModeMapping[tp]
+	mode, exist := ModeMapping[strings.ToLower(tp)]
 	if !exist {
 		return errors.New("invalid mode")
 	}
@@ -35,10 +36,10 @@ func (m *Mode) UnmarshalJSON(data []byte) error {
 }
 
 // UnmarshalYAML unserialize Mode with yaml
-func (m *Mode) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (m *TunnelMode) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	var tp string
 	unmarshal(&tp)
-	mode, exist := ModeMapping[tp]
+	mode, exist := ModeMapping[strings.ToLower(tp)]
 	if !exist {
 		return errors.New("invalid mode")
 	}
@@ -47,18 +48,23 @@ func (m *Mode) UnmarshalYAML(unmarshal func(interface{}) error) error {
 }
 
 // MarshalJSON serialize Mode
-func (m Mode) MarshalJSON() ([]byte, error) {
+func (m TunnelMode) MarshalJSON() ([]byte, error) {
 	return json.Marshal(m.String())
 }
 
-func (m Mode) String() string {
+// MarshalYAML serialize TunnelMode with yaml
+func (m TunnelMode) MarshalYAML() (interface{}, error) {
+	return m.String(), nil
+}
+
+func (m TunnelMode) String() string {
 	switch m {
 	case Global:
-		return "Global"
+		return "global"
 	case Rule:
-		return "Rule"
+		return "rule"
 	case Direct:
-		return "Direct"
+		return "direct"
 	default:
 		return "Unknown"
 	}

@@ -115,3 +115,52 @@ func TestMaxSize(t *testing.T) {
 	_, ok = c.Get("foo")
 	assert.False(t, ok)
 }
+
+func TestExist(t *testing.T) {
+	c := NewLRUCache(WithSize(1))
+	c.Set(1, 2)
+	assert.True(t, c.Exist(1))
+	c.Set(2, 3)
+	assert.False(t, c.Exist(1))
+}
+
+func TestEvict(t *testing.T) {
+	temp := 0
+	evict := func(key interface{}, value interface{}) {
+		temp = key.(int) + value.(int)
+	}
+
+	c := NewLRUCache(WithEvict(evict), WithSize(1))
+	c.Set(1, 2)
+	c.Set(2, 3)
+
+	assert.Equal(t, temp, 3)
+}
+
+func TestSetWithExpire(t *testing.T) {
+	c := NewLRUCache(WithAge(1))
+	now := time.Now().Unix()
+
+	tenSecBefore := time.Unix(now-10, 0)
+	c.SetWithExpire(1, 2, tenSecBefore)
+
+	// res is expected not to exist, and expires should be empty time.Time
+	res, expires, exist := c.GetWithExpire(1)
+	assert.Equal(t, nil, res)
+	assert.Equal(t, time.Time{}, expires)
+	assert.Equal(t, false, exist)
+
+}
+
+func TestStale(t *testing.T) {
+	c := NewLRUCache(WithAge(1), WithStale(true))
+	now := time.Now().Unix()
+
+	tenSecBefore := time.Unix(now-10, 0)
+	c.SetWithExpire(1, 2, tenSecBefore)
+
+	res, expires, exist := c.GetWithExpire(1)
+	assert.Equal(t, 2, res)
+	assert.Equal(t, tenSecBefore, expires)
+	assert.Equal(t, true, exist)
+}

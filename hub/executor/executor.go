@@ -1,16 +1,44 @@
 package executor
 
 import (
+	"fmt"
+	"io/ioutil"
+	"os"
+	"sync"
+
+	"github.com/Dreamacro/clash/adapters/provider"
 	"github.com/Dreamacro/clash/component/auth"
-	trie "github.com/Dreamacro/clash/component/domain-trie"
+	"github.com/Dreamacro/clash/component/dialer"
+	"github.com/Dreamacro/clash/component/resolver"
+	"github.com/Dreamacro/clash/component/trie"
 	"github.com/Dreamacro/clash/config"
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/dns"
 	"github.com/Dreamacro/clash/log"
 	P "github.com/Dreamacro/clash/proxy"
 	authStore "github.com/Dreamacro/clash/proxy/auth"
-	T "github.com/Dreamacro/clash/tunnel"
+	"github.com/Dreamacro/clash/tunnel"
 )
+
+var (
+	mux sync.Mutex
+)
+
+func readConfig(path string) ([]byte, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, err
+	}
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(data) == 0 {
+		return nil, fmt.Errorf("Configuration file %s is empty", path)
+	}
+
+	return data, err
+}
 
 // Parse config with default config path
 func Parse() (*config.Config, error) {
@@ -19,20 +47,31 @@ func Parse() (*config.Config, error) {
 
 // ParseWithPath parse config with custom config path
 func ParseWithPath(path string) (*config.Config, error) {
-	return config.Parse(path)
+	buf, err := readConfig(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return ParseWithBytes(buf)
+}
+
+// ParseWithBytes config with buffer
+func ParseWithBytes(buf []byte) (*config.Config, error) {
+	return config.Parse(buf)
 }
 
 // ApplyConfig dispatch configure to all parts
 func ApplyConfig(cfg *config.Config, force bool) {
+	mux.Lock()
+	defer mux.Unlock()
+
 	updateUsers(cfg.Users)
-	if force {
-		updateGeneral(cfg.General)
-	}
-	updateProxies(cfg.Proxies)
+	updateGeneral(cfg.General, force)
+	updateProxies(cfg.Proxies, cfg.Providers)
 	updateRules(cfg.Rules)
 	updateDNS(cfg.DNS)
 	updateHosts(cfg.Hosts)
-	updateExperimental(cfg.Experimental)
+	updateExperimental(cfg)
 }
 
 func GetGeneral() *config.General {
@@ -43,26 +82,28 @@ func GetGeneral() *config.General {
 	}
 
 	general := &config.General{
-		Port:           ports.Port,
-		SocksPort:      ports.SocksPort,
-		RedirPort:      ports.RedirPort,
-		Authentication: authenticator,
-		AllowLan:       P.AllowLan(),
-		BindAddress:    P.BindAddress(),
-		Mode:           T.Instance().Mode(),
-		LogLevel:       log.Level(),
+		Inbound: config.Inbound{
+			Port:           ports.Port,
+			SocksPort:      ports.SocksPort,
+			RedirPort:      ports.RedirPort,
+			MixedPort:      ports.MixedPort,
+			Authentication: authenticator,
+			AllowLan:       P.AllowLan(),
+			BindAddress:    P.BindAddress(),
+		},
+		Mode:     tunnel.Mode(),
+		LogLevel: log.Level(),
 	}
 
 	return general
 }
 
-func updateExperimental(c *config.Experimental) {
-	T.Instance().UpdateExperimental(c.IgnoreResolveFail)
-}
+func updateExperimental(c *config.Config) {}
 
 func updateDNS(c *config.DNS) {
 	if c.Enable == false {
-		dns.DefaultResolver = nil
+		resolver.DefaultResolver = nil
+		tunnel.SetResolver(nil)
 		dns.ReCreateServer("", nil)
 		return
 	}
@@ -76,8 +117,10 @@ func updateDNS(c *config.DNS) {
 			GeoIP:  c.FallbackFilter.GeoIP,
 			IPCIDR: c.FallbackFilter.IPCIDR,
 		},
+		Default: c.DefaultNameserver,
 	})
-	dns.DefaultResolver = r
+	resolver.DefaultResolver = r
+	tunnel.SetResolver(r)
 	if err := dns.ReCreateServer(c.Listen, r); err != nil {
 		log.Errorln("Start DNS server error: %s", err.Error())
 		return
@@ -88,29 +131,34 @@ func updateDNS(c *config.DNS) {
 	}
 }
 
-func updateHosts(tree *trie.Trie) {
-	dns.DefaultHosts = tree
+func updateHosts(tree *trie.DomainTrie) {
+	resolver.DefaultHosts = tree
 }
 
-func updateProxies(proxies map[string]C.Proxy) {
-	tunnel := T.Instance()
-	oldProxies := tunnel.Proxies()
-
-	// close proxy group goroutine
-	for _, proxy := range oldProxies {
-		proxy.Destroy()
-	}
-
-	tunnel.UpdateProxies(proxies)
+func updateProxies(proxies map[string]C.Proxy, providers map[string]provider.ProxyProvider) {
+	tunnel.UpdateProxies(proxies, providers)
 }
 
 func updateRules(rules []C.Rule) {
-	T.Instance().UpdateRules(rules)
+	tunnel.UpdateRules(rules)
 }
 
-func updateGeneral(general *config.General) {
+func updateGeneral(general *config.General, force bool) {
 	log.SetLevel(general.LogLevel)
-	T.Instance().SetMode(general.Mode)
+	tunnel.SetMode(general.Mode)
+	resolver.DisableIPv6 = !general.IPv6
+
+	if general.Interface != "" {
+		dialer.DialHook = dialer.DialerWithInterface(general.Interface)
+		dialer.ListenPacketHook = dialer.ListenPacketWithInterface(general.Interface)
+	} else {
+		dialer.DialHook = nil
+		dialer.ListenPacketHook = nil
+	}
+
+	if !force {
+		return
+	}
 
 	allowLan := general.AllowLan
 	P.SetAllowLan(allowLan)
@@ -128,6 +176,10 @@ func updateGeneral(general *config.General) {
 
 	if err := P.ReCreateRedir(general.RedirPort); err != nil {
 		log.Errorln("Start Redir server error: %s", err.Error())
+	}
+
+	if err := P.ReCreateMixed(general.MixedPort); err != nil {
+		log.Errorln("Start Mixed(http and socks5) server error: %s", err.Error())
 	}
 }
 

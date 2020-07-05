@@ -1,9 +1,10 @@
-package adapters
+package inbound
 
 import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/Dreamacro/clash/component/socks5"
 	C "github.com/Dreamacro/clash/constant"
@@ -16,15 +17,16 @@ func parseSocksAddr(target socks5.Addr) *C.Metadata {
 
 	switch target[0] {
 	case socks5.AtypDomainName:
-		metadata.Host = string(target[2 : 2+target[1]])
+		// trim for FQDN
+		metadata.Host = strings.TrimRight(string(target[2:2+target[1]]), ".")
 		metadata.DstPort = strconv.Itoa((int(target[2+target[1]]) << 8) | int(target[2+target[1]+1]))
 	case socks5.AtypIPv4:
 		ip := net.IP(target[1 : 1+net.IPv4len])
-		metadata.DstIP = &ip
+		metadata.DstIP = ip
 		metadata.DstPort = strconv.Itoa((int(target[1+net.IPv4len]) << 8) | int(target[1+net.IPv4len+1]))
 	case socks5.AtypIPv6:
 		ip := net.IP(target[1 : 1+net.IPv6len])
-		metadata.DstIP = &ip
+		metadata.DstIP = ip
 		metadata.DstPort = strconv.Itoa((int(target[1+net.IPv6len]) << 8) | int(target[1+net.IPv6len+1]))
 	}
 
@@ -38,9 +40,11 @@ func parseHTTPAddr(request *http.Request) *C.Metadata {
 		port = "80"
 	}
 
+	// trim FQDN (#737)
+	host = strings.TrimRight(host, ".")
+
 	metadata := &C.Metadata{
 		NetWork:  C.TCP,
-		Type:     C.HTTP,
 		AddrType: C.AtypDomainName,
 		Host:     host,
 		DstIP:    nil,
@@ -55,18 +59,18 @@ func parseHTTPAddr(request *http.Request) *C.Metadata {
 		default:
 			metadata.AddrType = C.AtypIPv4
 		}
-		metadata.DstIP = &ip
+		metadata.DstIP = ip
 	}
 
 	return metadata
 }
 
-func parseAddr(addr string) (*net.IP, string, error) {
+func parseAddr(addr string) (net.IP, string, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, "", err
 	}
 
 	ip := net.ParseIP(host)
-	return &ip, port, nil
+	return ip, port, nil
 }

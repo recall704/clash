@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -17,18 +18,27 @@ type websocketConn struct {
 	conn       *websocket.Conn
 	reader     io.Reader
 	remoteAddr net.Addr
+
+	// https://godoc.org/github.com/gorilla/websocket#hdr-Concurrency
+	rMux sync.Mutex
+	wMux sync.Mutex
 }
 
 type WebsocketConfig struct {
-	Host      string
-	Path      string
-	Headers   http.Header
-	TLS       bool
-	TLSConfig *tls.Config
+	Host           string
+	Port           string
+	Path           string
+	Headers        http.Header
+	TLS            bool
+	SkipCertVerify bool
+	ServerName     string
+	SessionCache   tls.ClientSessionCache
 }
 
 // Read implements net.Conn.Read()
 func (wsc *websocketConn) Read(b []byte) (int, error) {
+	wsc.rMux.Lock()
+	defer wsc.rMux.Unlock()
 	for {
 		reader, err := wsc.getReader()
 		if err != nil {
@@ -46,6 +56,8 @@ func (wsc *websocketConn) Read(b []byte) (int, error) {
 
 // Write implements io.Writer.
 func (wsc *websocketConn) Write(b []byte) (int, error) {
+	wsc.wMux.Lock()
+	defer wsc.wMux.Unlock()
 	if err := wsc.conn.WriteMessage(websocket.BinaryMessage, b); err != nil {
 		return 0, err
 	}
@@ -102,7 +114,7 @@ func (wsc *websocketConn) SetWriteDeadline(t time.Time) error {
 	return wsc.conn.SetWriteDeadline(t)
 }
 
-func NewWebsocketConn(conn net.Conn, c *WebsocketConfig) (net.Conn, error) {
+func StreamWebsocketConn(conn net.Conn, c *WebsocketConfig) (net.Conn, error) {
 	dialer := &websocket.Dialer{
 		NetDial: func(network, addr string) (net.Conn, error) {
 			return conn, nil
@@ -115,17 +127,22 @@ func NewWebsocketConn(conn net.Conn, c *WebsocketConfig) (net.Conn, error) {
 	scheme := "ws"
 	if c.TLS {
 		scheme = "wss"
-		dialer.TLSClientConfig = c.TLSConfig
-	}
+		dialer.TLSClientConfig = &tls.Config{
+			ServerName:         c.Host,
+			InsecureSkipVerify: c.SkipCertVerify,
+			ClientSessionCache: c.SessionCache,
+		}
 
-	host, port, _ := net.SplitHostPort(c.Host)
-	if (scheme == "ws" && port != "80") || (scheme == "wss" && port != "443") {
-		host = c.Host
+		if c.ServerName != "" {
+			dialer.TLSClientConfig.ServerName = c.ServerName
+		} else if host := c.Headers.Get("Host"); host != "" {
+			dialer.TLSClientConfig.ServerName = host
+		}
 	}
 
 	uri := url.URL{
 		Scheme: scheme,
-		Host:   host,
+		Host:   net.JoinHostPort(c.Host, c.Port),
 		Path:   c.Path,
 	}
 
@@ -142,7 +159,7 @@ func NewWebsocketConn(conn net.Conn, c *WebsocketConfig) (net.Conn, error) {
 		if resp != nil {
 			reason = resp.Status
 		}
-		return nil, fmt.Errorf("Dial %s error: %s", host, reason)
+		return nil, fmt.Errorf("Dial %s error: %s", uri.Host, reason)
 	}
 
 	return &websocketConn{
