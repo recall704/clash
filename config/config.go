@@ -385,7 +385,7 @@ func parseRules(cfg *RawConfig, proxies map[string]C.Proxy) ([]C.Rule, error) {
 			return nil, fmt.Errorf("Rules[%d] [%s] error: %s", idx, line, parseErr.Error())
 		}
 
-		rules = append(rules, parsed)
+		rules = append(rules, parsed...)
 	}
 
 	return rules, nil
