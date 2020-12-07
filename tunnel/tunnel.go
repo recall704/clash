@@ -12,21 +12,17 @@ import (
 	"github.com/Dreamacro/clash/component/nat"
 	"github.com/Dreamacro/clash/component/resolver"
 	C "github.com/Dreamacro/clash/constant"
-	"github.com/Dreamacro/clash/dns"
 	"github.com/Dreamacro/clash/log"
-
-	channels "gopkg.in/eapache/channels.v1"
 )
 
 var (
-	tcpQueue     = channels.NewInfiniteChannel()
-	udpQueue     = channels.NewInfiniteChannel()
-	natTable     = nat.New()
-	rules        []C.Rule
-	proxies      = make(map[string]C.Proxy)
-	providers    map[string]provider.ProxyProvider
-	configMux    sync.RWMutex
-	enhancedMode *dns.Resolver
+	tcpQueue  = make(chan C.ServerAdapter, 200)
+	udpQueue  = make(chan *inbound.PacketAdapter, 200)
+	natTable  = nat.New()
+	rules     []C.Rule
+	proxies   = make(map[string]C.Proxy)
+	providers map[string]provider.ProxyProvider
+	configMux sync.RWMutex
 
 	// Outbound Rule
 	mode = Rule
@@ -41,12 +37,15 @@ func init() {
 
 // Add request to queue
 func Add(req C.ServerAdapter) {
-	tcpQueue.In() <- req
+	tcpQueue <- req
 }
 
 // AddPacket add udp Packet to queue
 func AddPacket(packet *inbound.PacketAdapter) {
-	udpQueue.In() <- packet
+	select {
+	case udpQueue <- packet:
+	default:
+	}
 }
 
 // Rules return all rules
@@ -89,16 +88,10 @@ func SetMode(m TunnelMode) {
 	mode = m
 }
 
-// SetResolver set custom dns resolver for enhanced mode
-func SetResolver(r *dns.Resolver) {
-	enhancedMode = r
-}
-
 // processUDP starts a loop to handle udp packet
 func processUDP() {
-	queue := udpQueue.Out()
-	for elm := range queue {
-		conn := elm.(*inbound.PacketAdapter)
+	queue := udpQueue
+	for conn := range queue {
 		handleUDPConn(conn)
 	}
 }
@@ -112,15 +105,14 @@ func process() {
 		go processUDP()
 	}
 
-	queue := tcpQueue.Out()
-	for elm := range queue {
-		conn := elm.(C.ServerAdapter)
+	queue := tcpQueue
+	for conn := range queue {
 		go handleTCPConn(conn)
 	}
 }
 
 func needLookupIP(metadata *C.Metadata) bool {
-	return enhancedMode != nil && (enhancedMode.IsMapping() || enhancedMode.FakeIPEnabled()) && metadata.Host == "" && metadata.DstIP != nil
+	return resolver.MappingEnabled() && metadata.Host == "" && metadata.DstIP != nil
 }
 
 func preHandleMetadata(metadata *C.Metadata) error {
@@ -131,17 +123,17 @@ func preHandleMetadata(metadata *C.Metadata) error {
 
 	// preprocess enhanced-mode metadata
 	if needLookupIP(metadata) {
-		host, exist := enhancedMode.IPToHost(metadata.DstIP)
+		host, exist := resolver.FindHostByIP(metadata.DstIP)
 		if exist {
 			metadata.Host = host
 			metadata.AddrType = C.AtypDomainName
-			if enhancedMode.FakeIPEnabled() {
+			if resolver.FakeIPEnabled() {
 				metadata.DstIP = nil
 			} else if node := resolver.DefaultHosts.Search(host); node != nil {
 				// redir-host should lookup the hosts
 				metadata.DstIP = node.Data.(net.IP)
 			}
-		} else if enhancedMode.IsFakeIP(metadata.DstIP) {
+		} else if resolver.IsFakeIP(metadata.DstIP) {
 			return fmt.Errorf("fake DNS record %s missing", metadata.DstIP)
 		}
 	}
@@ -175,9 +167,9 @@ func handleUDPConn(packet *inbound.PacketAdapter) {
 		return
 	}
 
-	// make a fAddr if requset ip is fakeip
+	// make a fAddr if request ip is fakeip
 	var fAddr net.Addr
-	if enhancedMode != nil && enhancedMode.IsFakeIP(metadata.DstIP) {
+	if resolver.IsExistFakeIP(metadata.DstIP) {
 		fAddr = metadata.UDPAddr()
 	}
 
@@ -187,57 +179,65 @@ func handleUDPConn(packet *inbound.PacketAdapter) {
 	}
 
 	key := packet.LocalAddr().String()
-	pc := natTable.Get(key)
-	if pc != nil {
-		handleUDPToRemote(packet, pc, metadata)
+
+	handle := func() bool {
+		pc := natTable.Get(key)
+		if pc != nil {
+			handleUDPToRemote(packet, pc, metadata)
+			return true
+		}
+		return false
+	}
+
+	if handle() {
 		return
 	}
 
 	lockKey := key + "-lock"
-	wg, loaded := natTable.GetOrCreateLock(lockKey)
+	cond, loaded := natTable.GetOrCreateLock(lockKey)
 
 	go func() {
-		if !loaded {
-			wg.Add(1)
-			proxy, rule, err := resolveMetadata(metadata)
-			if err != nil {
-				log.Warnln("[UDP] Parse metadata failed: %s", err.Error())
-				natTable.Delete(lockKey)
-				wg.Done()
-				return
-			}
+		if loaded {
+			cond.L.Lock()
+			cond.Wait()
+			handle()
+			cond.L.Unlock()
+			return
+		}
 
-			rawPc, err := proxy.DialUDP(metadata)
-			if err != nil {
-				log.Warnln("[UDP] dial %s error: %s", proxy.Name(), err.Error())
-				natTable.Delete(lockKey)
-				wg.Done()
-				return
-			}
-			pc = newUDPTracker(rawPc, DefaultManager, metadata, rule)
-
-			switch true {
-			case rule != nil:
-				log.Infoln("[UDP] %s --> %v match %s using %s", metadata.SourceAddress(), metadata.String(), rule.RuleType().String(), rawPc.Chains().String())
-			case mode == Global:
-				log.Infoln("[UDP] %s --> %v using GLOBAL", metadata.SourceAddress(), metadata.String())
-			case mode == Direct:
-				log.Infoln("[UDP] %s --> %v using DIRECT", metadata.SourceAddress(), metadata.String())
-			default:
-				log.Infoln("[UDP] %s --> %v doesn't match any rule using DIRECT", metadata.SourceAddress(), metadata.String())
-			}
-
-			natTable.Set(key, pc)
+		defer func() {
 			natTable.Delete(lockKey)
-			wg.Done()
-			go handleUDPToLocal(packet.UDPPacket, pc, key, fAddr)
+			cond.Broadcast()
+		}()
+
+		proxy, rule, err := resolveMetadata(metadata)
+		if err != nil {
+			log.Warnln("[UDP] Parse metadata failed: %s", err.Error())
+			return
 		}
 
-		wg.Wait()
-		pc := natTable.Get(key)
-		if pc != nil {
-			handleUDPToRemote(packet, pc, metadata)
+		rawPc, err := proxy.DialUDP(metadata)
+		if err != nil {
+			log.Warnln("[UDP] dial %s to %s error: %s", proxy.Name(), metadata.String(), err.Error())
+			return
 		}
+		pc := newUDPTracker(rawPc, DefaultManager, metadata, rule)
+
+		switch true {
+		case rule != nil:
+			log.Infoln("[UDP] %s --> %v match %s(%s) using %s", metadata.SourceAddress(), metadata.String(), rule.RuleType().String(), rule.Payload(), rawPc.Chains().String())
+		case mode == Global:
+			log.Infoln("[UDP] %s --> %v using GLOBAL", metadata.SourceAddress(), metadata.String())
+		case mode == Direct:
+			log.Infoln("[UDP] %s --> %v using DIRECT", metadata.SourceAddress(), metadata.String())
+		default:
+			log.Infoln("[UDP] %s --> %v doesn't match any rule using DIRECT", metadata.SourceAddress(), metadata.String())
+		}
+
+		go handleUDPToLocal(packet.UDPPacket, pc, key, fAddr)
+
+		natTable.Set(key, pc)
+		handle()
 	}()
 }
 
@@ -257,13 +257,13 @@ func handleTCPConn(localConn C.ServerAdapter) {
 
 	proxy, rule, err := resolveMetadata(metadata)
 	if err != nil {
-		log.Warnln("Parse metadata failed: %v", err)
+		log.Warnln("[Metadata] parse failed: %s", err.Error())
 		return
 	}
 
 	remoteConn, err := proxy.Dial(metadata)
 	if err != nil {
-		log.Warnln("dial %s error: %s", proxy.Name(), err.Error())
+		log.Warnln("dial %s to %s error: %s", proxy.Name(), metadata.String(), err.Error())
 		return
 	}
 	remoteConn = newTCPTracker(remoteConn, DefaultManager, metadata, rule)
@@ -271,7 +271,7 @@ func handleTCPConn(localConn C.ServerAdapter) {
 
 	switch true {
 	case rule != nil:
-		log.Infoln("[TCP] %s --> %v match %s using %s", metadata.SourceAddress(), metadata.String(), rule.RuleType().String(), remoteConn.Chains().String())
+		log.Infoln("[TCP] %s --> %v match %s(%s) using %s", metadata.SourceAddress(), metadata.String(), rule.RuleType().String(), rule.Payload(), remoteConn.Chains().String())
 	case mode == Global:
 		log.Infoln("[TCP] %s --> %v using GLOBAL", metadata.SourceAddress(), metadata.String())
 	case mode == Direct:
@@ -289,7 +289,7 @@ func handleTCPConn(localConn C.ServerAdapter) {
 }
 
 func shouldResolveIP(rule C.Rule, metadata *C.Metadata) bool {
-	return !rule.NoResolveIP() && metadata.Host != "" && metadata.DstIP == nil
+	return rule.ShouldResolveIP() && metadata.Host != "" && metadata.DstIP == nil
 }
 
 func match(metadata *C.Metadata) (C.Proxy, C.Rule, error) {
